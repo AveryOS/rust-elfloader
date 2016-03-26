@@ -1,4 +1,4 @@
-#![feature(no_std, core, core_prelude, core_slice_ext, custom_derive)]
+#![feature(custom_derive)]
 #![no_std]
 
 #![crate_name = "elfloader"]
@@ -10,7 +10,7 @@ extern crate std;
 
 pub mod elf;
 use core::fmt;
-use core::mem::{transmute, size_of};
+use core::mem::size_of;
 
 pub type PAddr = u64;
 pub type VAddr = usize;
@@ -19,22 +19,13 @@ pub type VAddr = usize;
 pub struct ElfBinary<'s> {
     name: &'s str,
     region: &'s [u8],
-    header: &'s elf::FileHeader,
+    pub header: &'s elf::FileHeader,
 }
 
 impl<'s> fmt::Debug for ElfBinary<'s> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{} {}", self.name, self.header)
     }
-}
-
-/// Implement this for ELF loading.
-pub trait ElfLoader {
-    /// Allocates a virtual region of size amount of bytes.
-    fn allocate(&mut self, base: VAddr, size: usize, flags: elf::ProgFlag);
-
-    /// Copies the region into the base.
-    fn load(&mut self, base: VAddr, region: &'static [u8]);
 }
 
 // T must be a POD for this to be safe
@@ -116,11 +107,18 @@ impl<'s> ElfBinary<'s> {
         }
     }
 
-    // Enumerate all the symbols in the file
-    pub fn for_each_symbol<F: FnMut(&'s elf::Symbol)>(&self, mut func: F) {
+    pub fn find_symbol<F: FnMut(&'s elf::Symbol) -> bool> (&self, mut func: F) -> Option<&'s elf::Symbol> {
         for sym in self.section_headers().iter().filter(|s| s.shtype == elf::SHT_SYMTAB).flat_map(|s| self.section_symbols(s).iter()) {
-            func(sym);
+            if func(sym) {
+                return Some(sym);
+            }
         }
+        None
+    }
+
+    // Enumerate all the symbols in the file
+    pub fn for_each_symbol<F: FnMut(&'s elf::Symbol)> (&self, mut func: F) {
+        self.find_symbol(|s| { func(s); false });
     }
 
     /// Create a slice of the section headers.
@@ -150,28 +148,21 @@ impl<'s> ElfBinary<'s> {
         correct_class && correct_data && correct_elfversion && correct_machine && correct_osabi && correct_type
     }
 
-    fn load_header(&self, p: &elf::ProgramHeader, loader: &mut ElfLoader) {
-        let big_enough_region = self.region.len() >= (p.offset + p.filesz) as usize;
-        if !big_enough_region {
-            //log!("Unable to load {}", p);
-            return;
-        }
-
-        loader.allocate(p.vaddr, p.memsz as usize, p.flags);
-        let segment: &'static [u8] = unsafe {
-            core::slice::from_raw_parts(
-                transmute(&self.region[p.offset as usize]), p.filesz as usize)
-        };
-        loader.load(p.vaddr, segment);
+    fn load_header<L>(&self, p: &'s elf::ProgramHeader, loader: &L) -> Result<(), ()>
+            where L: Fn(&'s elf::ProgramHeader, &'s [u8]) -> Result<(), ()> {
+        let segment = &self.region[(p.offset as usize)..(p.offset as usize + p.filesz as usize)];
+        loader(p, segment)
     }
 
-    pub fn load(&self, loader: &mut ElfLoader) {
+    pub fn load<L>(&self, loader: L) -> Result<(), ()>
+            where L: Fn(&'s elf::ProgramHeader, &'s [u8]) -> Result<(), ()> {
         for p in self.program_headers() {
             let x = match p.progtype {
-                elf::PT_LOAD => self.load_header(p, loader),
+                elf::PT_LOAD => try!(self.load_header(p, &loader)),
                 _ => ()
             };
         }
-    }
 
+        Ok(())
+    }
 }

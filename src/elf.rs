@@ -4,7 +4,7 @@ use core::fmt;
 pub const ELF_MAGIC: &'static [u8] = &[0x7f, 'E' as u8, 'L' as u8, 'F' as u8];
 
 /// Represents the ELF file class (32-bit vs 64-bit)
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub struct Class(pub u8);
 
 /// Invalid ELF file class
@@ -33,7 +33,7 @@ impl fmt::Display for Class {
 }
 
 /// Represents the ELF file data format (little-endian vs big-endian)
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub struct Data(pub u8);
 
 /// Invalid ELF data format
@@ -423,7 +423,7 @@ impl fmt::Display for FileHeader {
 }
 
 /// Represents ELF Program Header flags
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub struct ProgFlag(pub u32);
 
 pub const PF_NONE : ProgFlag = ProgFlag(0);
@@ -461,7 +461,7 @@ impl fmt::Display for ProgFlag {
 }
 
 /// Represents ELF Program Header type
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub struct ProgType(pub u32);
 
 /// Program header table entry unused
@@ -526,7 +526,7 @@ pub struct ProgramHeader {
     /// Offset into the ELF file where this segment begins
     pub offset:   u64,
     /// Virtual address where this segment should be loaded
-    pub vaddr:    usize,
+    pub vaddr:    u64,
     /// Physical address where this segment should be loaded
     pub paddr:    u64,
     /// Size of this segment in the file
@@ -546,7 +546,7 @@ impl fmt::Display for ProgramHeader {
 }
 
 /// Represens ELF Section type
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub struct SectionType(pub u32);
 
 /// Inactive section with undefined values
@@ -640,7 +640,7 @@ impl fmt::Display for SectionType {
 ///
 /// Wrapper type for SectionFlag
 ///
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub struct SectionFlag(pub u64);
 
 /// Empty flags
@@ -727,7 +727,7 @@ impl fmt::Display for SectionHeader {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Eq, PartialEq)]
 pub struct SymbolType(pub u8);
 
 /// Unspecified symbol type
@@ -764,7 +764,7 @@ impl fmt::Display for SymbolType {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub struct SymbolBind(pub u8);
 
 /// Local symbol
@@ -789,7 +789,7 @@ impl fmt::Display for SymbolBind {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub struct SymbolVis(pub u8);
 
 /// Default symbol visibility
