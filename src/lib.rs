@@ -1,4 +1,4 @@
-#![feature(custom_derive)]
+#![feature(custom_derive, question_mark)]
 #![no_std]
 
 #![crate_name = "elfloader"]
@@ -15,150 +15,171 @@ use core::mem::size_of;
 pub type PAddr = u64;
 pub type VAddr = usize;
 
-/// Abstract representation of a loadable ELF binary.
-pub struct ElfBinary<'s> {
-    name: &'s str,
-    region: &'s [u8],
-    pub header: &'s elf::FileHeader,
+#[derive(Debug)]
+pub struct Error;
+
+macro_rules! error {
+    () => ({
+        Err(Error)
+    })
 }
 
-impl<'s> fmt::Debug for ElfBinary<'s> {
+pub trait DataHeader {
+    fn data<'s, 'i>(&'s self, image: &'i Image<'s>) -> &'s [u8];
+}
+
+impl DataHeader for elf::SectionHeader {
+    fn data<'s, 'i>(&'s self, image: &'i Image<'s>) -> &'s [u8] {
+        &image.region[(self.offset as usize)..(self.offset as usize + self.size as usize)]
+    }
+}
+
+impl DataHeader for elf::ProgramHeader {
+    fn data<'s, 'i>(&'s self, image: &'i Image<'s>) -> &'s [u8] {
+        &image.region[(self.offset as usize)..(self.offset as usize + self.filesz as usize)]
+    }
+}
+
+pub struct Image<'s> {
+    pub header: Option<&'s elf::FileHeader>,
+    pub segments: &'s [elf::ProgramHeader],
+    pub sections: &'s [elf::SectionHeader],
+    pub region: &'s [u8],
+    pub shstrtab: &'s elf::SectionHeader,
+}
+
+impl<'s> fmt::Debug for Image<'s> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{} {}", self.name, self.header)
+        write!(f, "header: {:?}", self.header)
     }
 }
 
 // T must be a POD for this to be safe
-unsafe fn slice_pod<T>(region: &[u8], offset: usize, count: usize) -> &[T] {
-    assert!(region.len() - offset >= count * size_of::<T>());
-    core::slice::from_raw_parts(region[offset..].as_ptr() as *const T, count)
+unsafe fn slice_pod<T>(region: &[u8], offset: usize, count: usize) -> Result<&[T], Error> {
+    if region.len() - offset < count * size_of::<T>() {
+        return error!();
+    }
+    Ok(core::slice::from_raw_parts(region[offset..].as_ptr() as *const T, count))
 }
 
-impl<'s> ElfBinary<'s> {
+pub fn get_headers<'s, T>(region: &'s [u8], offset: u64, num: u16, entry_size: u16, zero: bool) -> Result<&'s [T], Error> {
+    if offset == 0 && zero {
+        return Ok(&[]);
+    }
+    if entry_size as usize != size_of::<T>() {
+        return error!();
+    }
+    unsafe {
+        slice_pod(region, offset as usize, num as usize)
+    }
+}
 
-    /// Create a new ElfBinary.
-    /// Makes sure that the provided region has valid ELF magic byte sequence
-    /// and is big enough to contain at least the ELF file header
-    /// otherwise it will return None.
-    pub fn new(name: &'s str, region: &'s [u8]) -> Option<ElfBinary<'s>> {
-        if region.len() >= size_of::<elf::FileHeader>() && region.starts_with(elf::ELF_MAGIC) {
-            let header: &elf::FileHeader = unsafe { &slice_pod(region, 0, 1)[0] };
-            return Some(ElfBinary { name: name, region: region, header: header });
+impl<'s> Image<'s> {
+    /// Create a new Image.
+    pub fn new(region: &'s [u8]) -> Result<Image<'s>, Error> {
+        let header: &elf::FileHeader = unsafe { &slice_pod(region, 0, 1)?[0] };
+        if header.ident.magic != elf::ELF_MAGIC {
+            return error!();
         }
+        let sections = get_headers(region, header.shoff, header.shnum, header.shentsize, true)?;
+        let segments = get_headers(region, header.phoff, header.phnum, header.phentsize, true)?;
 
-        None
+        Ok(Image {
+            region: region,
+            header: Some(header),
+            segments: segments,
+            sections: sections,
+            shstrtab: &sections[header.shstrndx as usize],
+        })
     }
 
-    /// Print the program headers.
-    pub fn print_program_headers(&self) {
-        for p in self.program_headers() {
-            //log!("pheader = {}", p);
-        }
-    }
+    pub fn new_sections(region: &'s [u8], offset: u64, num: u16, entry_size: u16, strtab: u16) -> Result<Image<'s>, Error> {
+        let sections = get_headers(region, offset, num, entry_size, false)?;
 
-    /// Create a slice of the program headers.
-    pub fn program_headers(&self) -> &'s [elf::ProgramHeader] {
-        let correct_header_size = self.header.phentsize as usize == size_of::<elf::ProgramHeader>();
-        let pheader_region_size = self.header.phoff as usize + self.header.phnum as usize * self.header.phentsize as usize;
-        let big_enough_region = self.region.len() >= pheader_region_size;
-
-        if self.header.phoff == 0 || !correct_header_size || !big_enough_region {
-            return &[];
-        }
-
-        unsafe {
-            slice_pod(self.region, self.header.phoff as usize, self.header.phnum as usize)
-        }
+        Ok(Image {
+            region: region,
+            header: None,
+            segments: &[],
+            sections: sections,
+            shstrtab: &sections[strtab as usize],
+        })
     }
 
     // Get the string at offset str_offset in the string table strtab
-    fn strtab_str(&self, strtab: &'s elf::SectionHeader, str_offset: elf::StrOffset) -> &'s str {
-        assert!(strtab.shtype == elf::SHT_STRTAB);
-        let data = self.section_data(strtab);
+    fn strtab_str(&self, strtab: &'s elf::SectionHeader, str_offset: elf::StrOffset) -> Result<&'s str, Error> {
+        if strtab.shtype != elf::SHT_STRTAB {
+            return error!();
+        }
+        let data = strtab.data(self);
         let offset = str_offset.0 as usize;
         let mut end = offset;
         while data[end] != 0 {
             end += 1;
         }
-        core::str::from_utf8(&data[offset..end]).unwrap()
+        Ok(core::str::from_utf8(&data[offset..end]).unwrap())
     }
 
     // Get the name of the section
-    pub fn symbol_name(&self, symbol: &'s elf::Symbol) -> &'s str {
-        let strtab = self.section_headers().iter().find(|s| s.shtype == elf::SHT_STRTAB && self.section_name(s) == ".strtab").unwrap();
+    pub fn symbol_name(&self, symbol: &'s elf::Symbol, owner: &'s elf::SectionHeader) -> Result<&'s str, Error> {
+        let strtab = &self.sections[owner.link as usize];
         self.strtab_str(strtab, symbol.name)
     }
 
-    // Get the data of the section
-    pub fn section_data(&self, section: &'s elf::SectionHeader) -> &'s [u8] {
-        &self.region[(section.offset as usize)..(section.offset as usize + section.size as usize)]
-    }
-
     // Get the name of the section
-    pub fn section_name(&self, section: &'s elf::SectionHeader) -> &'s str {
-        self.strtab_str(&self.section_headers()[self.header.shstrndx as usize], section.name)
+    pub fn section_name(&self, section: &'s elf::SectionHeader) -> Result<&'s str, Error> {
+        self.strtab_str(self.shstrtab, section.name)
     }
 
     // Get the symbols of the section
-    fn section_symbols(&self, section: &'s elf::SectionHeader) -> &'s [elf::Symbol] {
+    fn section_symbols(&self, section: &'s elf::SectionHeader) -> Result<&'s [elf::Symbol], Error> {
         assert!(section.shtype == elf::SHT_SYMTAB);
         unsafe {
-            slice_pod(self.section_data(section), 0, section.size as usize / size_of::<elf::Symbol>())
+            slice_pod(section.data(self), 0, section.size as usize / size_of::<elf::Symbol>())
         }
     }
 
-    pub fn find_symbol<F: FnMut(&'s elf::Symbol) -> bool> (&self, mut func: F) -> Option<&'s elf::Symbol> {
-        for sym in self.section_headers().iter().filter(|s| s.shtype == elf::SHT_SYMTAB).flat_map(|s| self.section_symbols(s).iter()) {
-            if func(sym) {
-                return Some(sym);
+    pub fn find_symbol<F: FnMut(&'s elf::Symbol, &'s elf::SectionHeader) -> bool> (&self, mut func: F) -> Option<(&'s elf::Symbol, &'s elf::SectionHeader)> {
+        for section in self.sections {
+            if section.shtype != elf::SHT_SYMTAB {
+                continue;
+            }
+            for symbol in self.section_symbols(section).unwrap() {
+                if func(symbol, section) {
+                    return Some((symbol, section));
+                }
             }
         }
         None
     }
 
     // Enumerate all the symbols in the file
-    pub fn for_each_symbol<F: FnMut(&'s elf::Symbol)> (&self, mut func: F) {
-        self.find_symbol(|s| { func(s); false });
-    }
-
-    /// Create a slice of the section headers.
-    pub fn section_headers(&self) -> &'s [elf::SectionHeader] {
-        let correct_header_size = self.header.shentsize as usize == size_of::<elf::SectionHeader>();
-        let sheader_region_size = self.header.shoff as usize + self.header.shnum as usize * self.header.shentsize as usize;
-        let big_enough_region = self.region.len() >= sheader_region_size;
-
-        if self.header.shoff == 0 || !correct_header_size || !big_enough_region {
-            return &[];
-        }
-
-        unsafe {
-            slice_pod(self.region, self.header.shoff as usize, self.header.shnum as usize)
-        }
+    pub fn for_each_symbol<F: FnMut(&'s elf::Symbol, &'s elf::SectionHeader)> (&self, mut func: F) {
+        self.find_symbol(|s, h| { func(s, h); false });
     }
 
     /// Can we load the binary on our platform?
-    fn can_load(&self) -> bool {
-        let correct_class = self.header.ident.class == elf::ELFCLASS64;
-        let correct_elfversion = self.header.ident.version == elf::EV_CURRENT;
-        let correct_data = self.header.ident.data == elf::ELFDATA2LSB;
-        let correct_osabi = self.header.ident.osabi == elf::ELFOSABI_SYSV || self.header.ident.osabi == elf::ELFOSABI_LINUX;
-        let correct_type = self.header.elftype == elf::ET_EXEC || self.header.elftype == elf::ET_DYN;
-        let correct_machine = self.header.machine == elf::EM_X86_64;
+    fn can_load(&self) -> Result<bool, Error> {
+        let header = self.header.ok_or(Error)?;
+        let correct_class = header.ident.class == elf::ELFCLASS64;
+        let correct_elfversion = header.ident.version == elf::EV_CURRENT;
+        let correct_data = header.ident.data == elf::ELFDATA2LSB;
+        let correct_osabi = header.ident.osabi == elf::ELFOSABI_SYSV || header.ident.osabi == elf::ELFOSABI_LINUX;
+        let correct_type = header.elftype == elf::ET_EXEC || header.elftype == elf::ET_DYN;
+        let correct_machine = header.machine == elf::EM_X86_64;
 
-        correct_class && correct_data && correct_elfversion && correct_machine && correct_osabi && correct_type
-    }
-
-    fn load_header<L>(&self, p: &'s elf::ProgramHeader, loader: &L) -> Result<(), ()>
-            where L: Fn(&'s elf::ProgramHeader, &'s [u8]) -> Result<(), ()> {
-        let segment = &self.region[(p.offset as usize)..(p.offset as usize + p.filesz as usize)];
-        loader(p, segment)
+        Ok(correct_class &&
+           correct_data &&
+           correct_elfversion &&
+           correct_machine &&
+           correct_osabi &&
+           correct_type)
     }
 
     pub fn load<L>(&self, loader: L) -> Result<(), ()>
             where L: Fn(&'s elf::ProgramHeader, &'s [u8]) -> Result<(), ()> {
-        for p in self.program_headers() {
+        for p in self.segments {
             let x = match p.progtype {
-                elf::PT_LOAD => try!(self.load_header(p, &loader)),
+                elf::PT_LOAD => try!(loader(p, p.data(self))),
                 _ => ()
             };
         }
