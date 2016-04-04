@@ -434,6 +434,12 @@ pub const PF_W : ProgFlag = ProgFlag(2);
 /// Readable program segment
 pub const PF_R : ProgFlag = ProgFlag(4);
 
+impl ProgFlag {
+    pub fn executable(&self) -> bool {
+        (self.0 & PF_X.0) != 0
+    }
+}
+
 impl fmt::Debug for ProgFlag {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:#x}", self.0)
@@ -452,7 +458,7 @@ impl fmt::Display for ProgFlag {
         } else {
             try!(write!(f, " "));
         }
-        if (self.0 & PF_X.0) != 0 {
+        if self.executable() {
             write!(f, "E")
         } else {
             write!(f, " ")
@@ -814,12 +820,58 @@ impl fmt::Display for SymbolVis {
     }
 }
 
+#[derive(Eq, PartialEq, Copy, Clone)]
+pub struct SectionIndex(pub u16);
+
+pub const SHN_UNDEF : SectionIndex = SectionIndex(0);
+pub const SHN_LORESERVE : SectionIndex = SectionIndex(0xff00);
+pub const SHN_LOPROC : SectionIndex = SectionIndex(0xff00);
+pub const SHN_HIPROC : SectionIndex = SectionIndex(0xff1f);
+pub const SHN_ABS : SectionIndex = SectionIndex(0xfff1);
+pub const SHN_COMMON : SectionIndex = SectionIndex(0xfff2);
+pub const SHN_HIRESERVE : SectionIndex = SectionIndex(0xffff);
+
+impl SectionIndex {
+    pub fn section(&self) -> Option<usize> {
+        if self.reserved() {
+            None
+        } else {
+            Some(self.0 as usize)
+        }
+    }
+
+    fn reserved(&self) -> bool {
+        self.0 >= SHN_LORESERVE.0
+    }
+
+    fn name(&self) -> Option<&'static str> {
+        Some(match *self {
+            SHN_UNDEF => "SHN_UNDEF",
+            SHN_LORESERVE => "SHN_LORESERVE",
+            SHN_HIPROC => "SHN_HIPROC",
+            SHN_ABS => "SHN_ABS",
+            SHN_COMMON => "SHN_COMMON",
+            SHN_HIRESERVE => "SHN_HIRESERVE",
+            _ => return None,
+        })
+    }
+}
+
+impl fmt::Display for SectionIndex {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self.name() {
+            Some(name) => write!(f, "{}", name),
+            None => write!(f, "SectionIndex({} reserved: {})", self.0, self.reserved()),
+        }
+    }
+}
+
 pub struct Symbol {
     /// Symbol name
     pub name: StrOffset,
-    info: u8,
-    other: u8,
-    section_index: u16,
+    pub info: u8,
+    pub other: u8,
+    pub section_index: SectionIndex,
     /// Symbol value
     pub value: u64,
     /// Symbol size
